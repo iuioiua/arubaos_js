@@ -1,30 +1,39 @@
+import { assert } from "./deps.ts";
+
 export interface ClientInit {
-  origin: string;
-  version?: string;
+  host: string;
   username?: string;
   password?: string;
 }
 
 export class Client {
-  #origin: string;
-  #version: string;
   #username: string;
   #password: string;
+  #baseURL: string;
   #cookie?: string;
 
-  constructor({ origin, version, username, password }: ClientInit) {
-    this.#origin = origin;
-    this.#version = version ?? "v1";
-    this.#username = username ?? "admin";
-    this.#password = password ?? "";
+  constructor(init: ClientInit) {
+    this.#username = init.username ??
+      Deno.env.get("ARUBAOS_USERNAME") ?? "admin";
+    this.#password = init.password ??
+      Deno.env.get("ARUBAOS_PASSWORD") ?? "";
+    this.#baseURL = "https://" + init.host + ":4343/v1";
   }
 
-  request(path: string, init?: RequestInit): Promise<Response> {
-    const url = new URL(this.#origin + ":4343/" + this.#version + path);
-    url.searchParams.append("UIDARUBA", this.#cookie!);
+  async request(path: string, init?: RequestInit): Promise<Response> {
+    const url = new URL(this.#baseURL + path);
+    url.searchParams.set("UIDARUBA", this.#cookie!);
     const request = new Request(url.toString(), init);
     request.headers.set("cookie", "SESSION=" + this.#cookie!);
-    return fetch(request);
+    return await fetch(request);
+  }
+
+  async run(command: string): Promise<string> {
+    const path = "/configuration/showcommand?command=" +
+      encodeURIComponent(command);
+    const response = await this.request(path);
+    const body = await response.json();
+    return body._data[0];
   }
 
   async login(): Promise<void> {
@@ -35,28 +44,48 @@ export class Client {
         password: this.#password,
       }),
     });
-    console.assert(response.ok, "Login failed");
-    const { _global_result } = await response.json();
-    this.#cookie = _global_result.UIDARUBA;
+    const body = await response.json();
+    assert(response.ok, "Login failed");
+    this.#cookie = body._global_result.UIDARUBA;
   }
 
   async logout(): Promise<void> {
     const response = await this.request("/api/logout", {
       method: "POST",
     });
-    console.assert(response.ok, "Logout failed");
+    await response.body?.cancel();
+    assert(response.ok, "Logout failed");
     this.#cookie = undefined;
+  }
+
+  async requestOnce(path: string, init?: RequestInit): Promise<Response> {
+    await this.login();
+    const response = await this.request(path, init);
+    await this.logout();
+    return response;
+  }
+
+  async runOnce(command: string): Promise<string> {
+    await this.login();
+    const output = await this.run(command);
+    await this.logout();
+    return output;
   }
 }
 
-export async function request(
+export async function requestOnce(
   clientInit: ClientInit,
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
   const client = new Client(clientInit);
-  await client.login();
-  const response = await client.request(path, init);
-  await client.logout();
-  return response;
+  return await client.requestOnce(path, init);
+}
+
+export async function runOnce(
+  clientInit: ClientInit,
+  command: string,
+): Promise<string> {
+  const client = new Client(clientInit);
+  return await client.runOnce(command);
 }
